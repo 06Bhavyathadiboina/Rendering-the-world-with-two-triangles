@@ -1,0 +1,225 @@
+// Signed distance fields
+//float mapSphere( vec3 p)
+//{    
+  //  return length(p) - 0.225; // Just spheres.
+//}
+
+uniform sampler2D tex; // Texture to use
+
+float mapSphere(vec3 p)
+{
+    float distance = length(p) - 0.225; // Distance to sphere
+    vec2 uv = vec2(distance, 0.5); // Map distance to normalized texture coordinate
+    vec4 texColor = texture(tex, uv); // Look up color value in texture
+    float texValue = (texColor.r + texColor.g + texColor.b) / 3.0; // Convert color to grayscale value
+    float textureScale = 1.0; // Scale factor for texture
+    float texDist = (distance + textureScale * texValue) * 0.5; // Combine distance and texture
+    return texDist;
+}
+
+
+float mapCube(vec3 p)
+{
+    float distance = max(p.x, max(p.y, p.z)) - 0.25 + dot(p, p) * 0.5; // Distance to cube
+    vec2 uv = vec2(p.x, p.y); // Map x and y coordinates to normalized texture coordinates
+    vec4 texColor = texture(tex, uv); // Look up color value in texture
+    float texValue = (texColor.r + texColor.g + texColor.b) / 3.0; // Convert color to grayscale value
+    float textureScale = 5.0; // Scale factor for texture
+    float texDist = (distance + textureScale * texValue) * 0.5; // Combine distance and texture
+    return texDist;
+}
+
+float myTorus(vec3 p, float r, float t) {
+    vec2 q = vec2(length(p.xz) - r, p.y);
+    return length(q) - t;
+}
+#define FAR 30.
+
+// Returns the signed distance to the nearest surface from the given point.
+float map(vec3 p)
+{
+    
+    
+   // Random displacement applied to the input point.
+    float n = sin(dot(floor(p), vec3(27, 113, 57)));
+    vec3 rnd = fract(vec3(2097152, 262144, 32768)*n)*.16 - .08;
+    p = fract(p + rnd) - .5;
+    
+    // Map to the surface of the sphere and cube, and blend between them using a sine wave.
+    p = abs(p); 
+    float c1 = mapSphere(p);
+    float c2 = mapCube(p);
+    float majorRadius = 0.2;
+    float tubeRadius = 0.09;
+    float c3 = myTorus(p, majorRadius, tubeRadius);
+    float cf = sin(iTime)*0.5+0.5;
+    //return mix(c2,c1,cf);
+    return mix(mix(c3,c2,cf),mix(c2,c1,cf),cf);
+}
+
+// Performs ray marching to trace the path of a ray through the scene.
+float trace(vec3 ro, vec3 rd)
+{
+    float t = 0., d;
+    
+    // Iterate until the maximum number of steps is reached, or until the distance to the nearest surface is below a threshold.
+    for (int i = 0; i < 96; i++){
+        d = map(ro + rd*t);
+        if(abs(d) < .001 || t > FAR) break;        
+        t += d * .75;
+    }
+    
+    return t;
+}
+
+// Similar to trace, but uses a smaller step size for more accuracy when calculating reflections.
+float traceRef(vec3 ro, vec3 rd)
+{   
+    float t = 0., d;
+    
+    for (int i = 0; i < 48; i++){
+        d = map(ro + rd*t);
+        if(abs(d) < .002 || t > FAR) break;
+        t += d;
+    }
+    
+    return t;
+}
+
+
+float softShadow(vec3 ro, vec3 lp, float k){
+    // Define maximum number of iterations for shadow rays.
+    const int maxIterationsShad = 24; 
+    // Define step distance between shadow rays.
+    float stepDist = max(length(lp - ro) / float(maxIterationsShad), 0.001);
+    // Initialize variables for distance and shadow factor.
+    float dist = 0.002;
+    float shade = 1.0;
+    // Normalize direction ray.
+    vec3 rd = normalize(lp - ro);
+    // Loop over shadow rays.
+    for (int i = 0; i < maxIterationsShad; i++) {
+        // Calculate distance to closest surface along the shadow ray.
+        float h = map(ro + rd * dist);
+        // Update shadow factor based on distance and shadow bias.
+        shade = min(shade, smoothstep(0.0, 1.0, k * h / dist));
+        // Update distance to next shadow ray based on distance to closest surface.
+        dist += clamp(h, 0.02, 0.25);
+        // Break loop if distance to closest surface is less than zero or greater than the distance to the light source.
+        if (h < 0.0 || dist > length(lp - ro)) {
+            break;
+        }
+    }
+    // Add bias to shadow factor and clamp between 0 and 1.
+    return min(max(shade, 0.0) + 0.25, 1.0); 
+}
+
+vec3 getNormal(in vec3 p) {
+    const vec2 e = vec2(.001, 0);
+    float dx = map(p + e.xyy) - map(p - e.xyy);
+    float dy = map(p + e.yxy) - map(p - e.yxy);
+    float dz = map(p + e.yyx) - map(p - e.yyx);
+    return normalize(vec3(dx, dy, dz));
+}
+
+vec3 getObjectColor(vec3 p){
+    
+    // "floor(p)" is analogous to a unique ID - based on position.
+    vec3 ip = floor(p);
+    
+    // Unique random cell number.
+    float rnd = fract(sin(dot(ip, vec3(27.17, 112.61, 57.53)))*43758.5453);
+    
+    // Color up the objects in a cubic checkered arrangement using a subtle version
+    // of IQ's palette formula.
+    vec3 col;
+    
+    if (fract(dot(ip, vec3(.5))) > .001) {
+        col = vec3(1., 1., 0.); // skyblue
+    } else {
+        col = vec3(1.0, 0.7, 0.9); // pink
+    }
+    
+    // Reverse the RGB channels on some of the objects, for a bit of variance.
+    if(fract(rnd*1183.5437 + .42)>.65) col = col.zyx;
+    
+    return col;
+    
+}
+
+vec3 doColor(in vec3 sp, in vec3 rd, in vec3 sn, in vec3 lp, float t){
+    
+    // Calculate the light direction vector and its distance from the surface.
+    vec3 ld = lp - sp;
+    float lDist = max(length(ld), .001);
+    
+    // Normalize the light direction vector.
+    ld /= lDist;
+    
+    // Calculate the attenuation factor based on the light distance.
+    float atten = 1. / (1. + lDist*.2 + lDist*lDist*.1);
+    
+    // Calculate the diffuse term.
+    float diff = max(dot(sn, ld), 0.);
+    
+    // Calculate the specular term.
+    float spec = pow(max(dot(reflect(-ld, sn), -rd), 0.), 8.);
+    
+    // Get the color of the object at the current position.
+    vec3 objCol = getObjectColor(sp);
+    
+    // Combine the diffuse and specular terms to produce the final scene color.
+    vec3 sceneCol = (objCol*(diff + .15) + vec3(1., .6, .2)*spec*2.)*atten;
+    
+    // Calculate the fog factor based on the distance from the camera.
+    float fogF = smoothstep(0., .95, t/FAR);
+    
+    // Apply the background fog to the scene color.
+    sceneCol = mix(sceneCol, vec3(0), fogF); 
+
+    // Return the final scene color.
+    return sceneCol;
+    
+}
+
+void mainImage( out vec4 fragColor, in vec2 fragCoord ){
+	vec2 uv = (fragCoord.xy - iResolution.xy*.5) / iResolution.y;
+
+    vec3 rd = normalize(vec3(uv, 1));
+    
+    float cs = cos(iTime * .10), si = sin(iTime * .10);
+    rd.xy = mat2(cs, si, -si, cs)*rd.xy;
+    rd.xz = mat2(cs, si, -si, cs)*rd.xz;
+    
+
+    vec3 ro = vec3(0, 0, iTime*1.5);
+    
+    vec3 lp = ro + vec3(0, 1, -.5);
+    
+    float t = trace(ro, rd);
+    
+    ro += rd*t;
+
+    vec3 sn = getNormal(ro);
+    
+    vec3 sceneColor = doColor(ro, rd, sn, lp, t);
+    
+    float sh = softShadow(ro +  sn*.0015, lp, 16.);
+    
+    rd = reflect(rd, sn);
+    
+    t = traceRef(ro +  sn*.003, rd);
+
+    ro += rd*t;
+   
+    sn = getNormal(ro);
+    
+    //sceneColor += doColor(ro, rd, sn, lp, t)*.35;
+    // Other combinations... depending what you're trying to achieve.
+    sceneColor = sceneColor*.7 + doColor(ro, rd, sn, lp, t)*.5;
+    
+    sceneColor *= sh;
+    
+    
+	fragColor = vec4(sqrt(clamp(sceneColor, 0., 1.)), 1);
+}
